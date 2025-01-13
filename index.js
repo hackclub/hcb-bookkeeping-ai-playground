@@ -236,13 +236,136 @@ async function processTransactions(csvPath) {
             continue;
         }
 
-        // ============================================
-        // TODO: Add your transformation logic here
-        // This is where you'll add logic to:
-        // 1. Analyze the transaction
-        // 2. Categorize it
-        // 3. Assign the appropriate account ID
-        // ============================================
+        const { object } = await generateObject({
+            schema: z.object({
+                accountName: z.string().describe('The name of the account in the chart of accounts'),
+                accountId: z.string().describe('The ID of the account in the chart of accounts'),
+                questions: z.array(z.object({
+                    thoughtfulQuestion: z.string().describe("Keep it concise. Don't repeat transaction info or answers."),
+                    multipleChoiceOptions: z.array(z.string()).describe("Contains the possible answers. Don't have other as an option. Keep it short")
+                })).describe('Questions to ask the user if you need additional information')
+            }),
+            model: openai('gpt-4o'),
+            prompt: `
+Given the following transaction and chart of accounts, determine the account name and account ID for the transaction.
+
+You can ask the user 1 or 2 well-thought-out follow up question if you need additional information to determine where in the chart of accounts the transaction belongs. You can ask multiple choice questions.
+
+You only get 1 chance to ask the user for information.
+
+Transaction: ${JSON.stringify(transaction)}
+
+Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
+`
+        });
+
+        let accountName = object.accountName;
+        let accountId = object.accountId;
+
+        let questions = object.questions;
+
+        if (questions && questions.length > 0) {
+            const question = questions[0];
+
+            // Display transaction details in a pretty format
+            console.log('\nTransaction Details:');
+            console.log('-------------------');
+            console.log(`Date: ${transaction.date?.toLocaleDateString()}`);
+            console.log(`Amount: $${(transaction.amount/100).toFixed(2)}`);
+            console.log(`Description: ${transaction.description || 'N/A'}`);
+            console.log(`Memo: ${transaction.memo || 'N/A'}`);
+            if (transaction.comments) {
+                console.log(`Comments: ${transaction.comments}`);
+            }
+            console.log('-------------------\n');
+
+            // Get user input via readline
+            const readline = require('readline').createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+
+            const selectedAnswer = await new Promise(resolve => {
+                // First display the question
+                console.log(question.thoughtfulQuestion);
+                
+                // Then show the multiple choice options
+                console.log('');
+                question.multipleChoiceOptions.forEach((option, i) => {
+                    console.log(`${i + 1}. ${option}`);
+                });
+
+                readline.question('\nPick an option (or type any custom response): ', answer => {
+                    const num = parseInt(answer);
+                    if (num >= 1 && num <= question.multipleChoiceOptions.length) {
+                        // If they entered a valid number, use that choice
+                        resolve(question.multipleChoiceOptions[num - 1]);
+                    } else {
+                        // Otherwise treat their input as a custom answer
+                        resolve(answer.trim());
+                    }
+                    readline.close();
+                });
+            });
+
+            console.log(`\nRecorded answer: ${selectedAnswer}\n`);
+
+            const { object: categorization } = await generateObject({
+                schema: z.object({
+                    accountName: z.string().describe('The category for this transaction'),
+                    accountId: z.string().describe('The account ID for this transaction')
+                }),
+                model: openai('gpt-4o'),
+                prompt: `Given the following transaction and user input, determine the category and account ID for the transaction.
+                
+                Transaction: ${JSON.stringify(transaction)}
+                Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
+                
+                Question: ${question.thoughtfulQuestion}
+                User's answer: ${selectedAnswer}
+                
+                Based on this information, determine the appropriate category and account ID.`
+            });
+
+            accountName = categorization.accountName;
+            accountId = categorization.accountId;
+        }
+
+        // Get account name from chart of accounts and format with parent hierarchy
+        const getFullAccountName = (accountId) => {
+            const parts = [];
+            
+            // Helper function to search through nested accounts
+            const findAccount = (obj) => {
+                if (obj.id === accountId) return obj;
+                if (obj.subAccounts) {
+                    for (const subAccount of Object.values(obj.subAccounts)) {
+                        const found = findAccount(subAccount);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            
+            // Search through top level accounts
+            let current = null;
+            for (const topAccount of Object.values(CHART_OF_ACCOUNTS)) {
+                current = findAccount(topAccount);
+                if (current) break;
+            }
+            
+            // Build the hierarchy path
+            while (current) {
+                parts.unshift(current.name);
+                // Search for parent by looking through all accounts again
+                const parentId = current.parentId;
+                current = parentId ? findAccount(CHART_OF_ACCOUNTS) : null;
+            }
+            
+            return parts.join(' > ');
+        };
+        transaction.accountName = getFullAccountName(accountId);
+        transaction.accountId = accountId;
 
         // Prepare CSV fields with proper escaping
         const fields = [
@@ -294,4 +417,4 @@ async function processTransactions(csvPath) {
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
 
-processTransactions('test.csv');
+await processTransactions('test.csv');
