@@ -63,18 +63,27 @@ async function fetchAllTransactions(organizationId) {
 }
 
 async function processCounterspells() {
+  const organizations = [];
+  
   for (const counterspell of counterspellsData) {
     console.log(`Fetching transactions for ${counterspell.name} (${counterspell.id})`);
     
     const transactions = await fetchAllTransactions(counterspell.id);
     console.log(`Found ${transactions.length} transactions`);
     
+    organizations.push({
+      ...counterspell,
+      transactions
+    });
+    
+    // Write the current state after each organization is processed
+    // This helps with resumability and prevents data loss if the script fails
     await Bun.write(
-      `./test_data/counterspell/transactions_${counterspell.slug}.json`,
-      JSON.stringify(transactions, null, 2)
+      './test_data/counterspell/all_transactions.json',
+      JSON.stringify(organizations, null, 2)
     );
     
-    console.log(`Saved transactions for ${counterspell.name}`);
+    console.log(`Saved data including ${counterspell.name}`);
   }
 }
 
