@@ -1,15 +1,7 @@
 # hcb-bookkeeping-ai-playground
 
-To install dependencies:
+Scripts to explore potential of applying AI to Hack Club's books.
 
-```bash
-bun install
-```
-
-To run:
-
-```bash
-bun run index.js
-```
-
-This project was created using `bun init` in bun v1.1.20. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+Give it an input CSV at `test.csv` and it will output a processed CSV at
+`processed.csv` and generate a statement of activity at
+`statement_of_activity.xlsx`.
