@@ -3,7 +3,7 @@ import { openai } from '@ai-sdk/openai';
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import { parse } from 'csv-parse/sync';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 
 // Chart of Accounts
 const CHART_OF_ACCOUNTS = {
@@ -125,13 +125,30 @@ async function identifyFields(headers) {
     return object;
 }
 
+// Helper function for CSV operations
+function escapeCsvField(field) {
+    if (field === null || field === undefined) return '';
+    const stringField = String(field);
+    if (stringField.includes(',') || stringField.includes('"') || stringField.includes('\n')) {
+        return `"${stringField.replace(/"/g, '""')}"`;
+    }
+    return stringField;
+}
+
+// Common CSV parse options
+const CSV_PARSE_OPTIONS = {
+    columns: true,
+    skip_empty_lines: true,
+    trim: true,
+    relax_column_count: true,
+    quote: '"',
+    escape: '"',
+    relaxQuotes: true
+};
+
 async function loadTransactions(csvPath) {
     const fileContent = readFileSync(csvPath, 'utf-8');
-    const records = parse(fileContent, {
-        columns: true,
-        skip_empty_lines: true,
-        trim: true
-    });
+    const records = parse(fileContent, CSV_PARSE_OPTIONS);
 
     if (records.length === 0) {
         throw new Error('No transactions found in CSV file');
@@ -170,10 +187,91 @@ async function loadTransactions(csvPath) {
     });
 }
 
+// Function to create a unique transaction key
+function createTransactionKey(transaction) {
+    // Format date to YYYY-MM-DD for consistent matching
+    const dateStr = transaction.date instanceof Date ? 
+        transaction.date.toISOString().split('T')[0] : 
+        (transaction.date || '');
+
+    // Format amount to fixed decimal places for consistent matching
+    const amountStr = typeof transaction.amount === 'number' ? 
+        transaction.amount.toFixed(2) : 
+        (transaction.amount || '');
+
+    // Get description or memo or reference - whatever is available
+    const descStr = transaction.description || transaction.memo || '';
+
+    // Combine fields into a unique key
+    return `${dateStr}|${amountStr}|${descStr}`.toLowerCase().trim();
+}
+
 // Function to process all transactions
 async function processTransactions(csvPath) {
     const transactions = await loadTransactions(csvPath);
     console.log(`Loaded ${transactions.length} transactions`);
+
+    // Load already processed transactions to avoid duplicates
+    const processedTransactions = new Set();
+    if (existsSync('processed.csv')) {
+        const processed = parse(readFileSync('processed.csv', 'utf-8'), CSV_PARSE_OPTIONS);
+        processed.forEach(record => {
+            const key = createTransactionKey({
+                date: record.date ? new Date(record.date) : null,
+                amount: record.amount ? parseFloat(record.amount) : null,
+                description: record.description,
+                memo: record.memo
+            });
+            processedTransactions.add(key);
+        });
+    }
+
+    // Process each transaction
+    for (const transaction of transactions) {
+        // Create unique key for matching
+        const transactionKey = createTransactionKey(transaction);
+        
+        if (processedTransactions.has(transactionKey)) {
+            console.log('Skipping already processed transaction:', transactionKey);
+            continue;
+        }
+
+        // ============================================
+        // TODO: Add your transformation logic here
+        // This is where you'll add logic to:
+        // 1. Analyze the transaction
+        // 2. Categorize it
+        // 3. Assign the appropriate account ID
+        // ============================================
+
+        // Prepare CSV fields with proper escaping
+        const fields = [
+            transaction.date ? transaction.date.toISOString() : '',
+            transaction.amount,
+            transaction.category || '',
+            transaction.accountId || '',
+            ...Object.values(transaction).slice(4)
+        ].map(escapeCsvField);
+
+        // Save to processed.csv
+        const csvLine = fields.join(',') + '\n';
+        
+        if (!existsSync('processed.csv')) {
+            const headerFields = [
+                'date',
+                'amount',
+                'category',
+                'accountId',
+                ...Object.keys(transaction).slice(4)
+            ].map(escapeCsvField);
+            
+            writeFileSync('processed.csv', headerFields.join(',') + '\n');
+        }
+        
+        writeFileSync('processed.csv', csvLine, { flag: 'a' });
+        processedTransactions.add(transactionKey);
+    }
+
     return transactions;
 }
 
@@ -195,6 +293,5 @@ async function processTransactions(csvPath) {
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
-const testTransactions = await processTransactions('test.csv');
-console.log('\nStructured Transactions:');
-console.log(JSON.stringify(testTransactions, null, 2));
+
+processTransactions('test.csv');
