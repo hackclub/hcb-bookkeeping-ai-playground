@@ -405,21 +405,6 @@ Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
     return transactions;
 }
 
-// // Movie review AI example
-// const { object } = await generateObject({
-//     schema: z.object({
-//         title: z.string().describe('The title of the movie'),
-//         rating: z.number().min(1).max(10).describe('Rating out of 10'),
-//         summary: z.string().describe('Brief summary of the review'),
-//         pros: z.array(z.string()).describe('List of positive points'),
-//         cons: z.array(z.string()).describe('List of negative points')
-//     }),
-//     model: openai('gpt-4'),
-//     prompt: 'Review the movie "Inception" in a structured format.'
-// });
-
-// console.log('Structured Movie Review:');
-// console.log(JSON.stringify(object, null, 2));
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
