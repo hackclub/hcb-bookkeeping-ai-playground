@@ -4,6 +4,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { parse } from 'csv-parse/sync';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import * as XLSX from 'xlsx';
 
 // Chart of Accounts
 const CHART_OF_ACCOUNTS = {
@@ -11,8 +12,8 @@ const CHART_OF_ACCOUNTS = {
         id: '4000',
         name: 'Income',
         subAccounts: {
-            majorGifts: { id: '4100', name: 'Major Gifts' },
-            webDonations: { id: '4200', name: 'Web Donations' },
+            majorGifts: { id: '4100', name: 'Major Gifts $5k+' },
+            webDonations: { id: '4200', name: 'Grassroots Donations' },
             earnedRevenue: { id: '4300', name: 'Earned Revenue' }
         }
     },
@@ -260,7 +261,7 @@ to determine where in the chart of accounts the transaction belongs.
 
 You only get 1 chance to ask the user for information, so make it count.
 
-Transaction: ${JSON.stringify(transaction)}
+Transaction (amount is in cents): ${JSON.stringify(transaction)}
 
 Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
 `
@@ -405,8 +406,272 @@ Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
     return transactions;
 }
 
+async function generateStatementOfActivity(csvPath) {
+    // Load and parse processed.csv
+    const fileContent = readFileSync(csvPath, 'utf-8');
+    const records = parse(fileContent, CSV_PARSE_OPTIONS);
+
+    if (records.length === 0) {
+        throw new Error(`No transactions found in ${csvPath}`);
+    }
+
+    // Get headers and identify key fields
+    const { dateField, amountField } = await identifyFields(Object.keys(records[0]));
+    const accountIdField = 'accountId';
+
+    // Group transactions by account and month
+    const transactionsByAccount = {};
+    const monthlyTotals = {};
+    const sortedMonths = new Set();
+    
+    records.forEach(record => {
+        const date = new Date(record[dateField]);
+        const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+        sortedMonths.add(monthKey);
+        const amount = parseFloat(record[amountField]) / 100;
+        const accountId = record[accountIdField];
+
+        // Store transaction by account
+        if (!transactionsByAccount[accountId]) {
+            transactionsByAccount[accountId] = [];
+        }
+        transactionsByAccount[accountId].push({
+            date: date.toISOString().split('T')[0],
+            amount,
+            description: record.description || record.memo || '',
+            monthKey
+        });
+
+        // Update monthly totals
+        if (!monthlyTotals[monthKey]) {
+            monthlyTotals[monthKey] = {};
+        }
+        if (!monthlyTotals[monthKey][accountId]) {
+            monthlyTotals[monthKey][accountId] = 0;
+        }
+        monthlyTotals[monthKey][accountId] += amount;
+    });
+
+    const sortedMonthsArray = Array.from(sortedMonths).sort();
+
+    // Prepare worksheet data with transactions
+    const wsData = [];
+    let currentRow = 0;
+
+    // Add header row
+    const headerRow = [
+        'Account', 
+        'Account ID', 
+        'Date',
+        'Description',
+        ...sortedMonthsArray.map(month => {
+            const [year, monthNum] = month.split('-');
+            return new Date(year, monthNum - 1).toLocaleString('default', { month: 'short', year: 'numeric' });
+        })
+    ];
+
+    // Helper function to calculate the actual depth of an account in the hierarchy
+    function getAccountDepth(account) {
+        let maxDepth = 0;
+        if (account.subAccounts) {
+            maxDepth = 1 + Math.max(...Object.values(account.subAccounts).map(getAccountDepth));
+        }
+        return maxDepth;
+    }
+
+    // Helper function to add account rows with transactions and proper grouping
+    function addAccountRows(account, level = 0, parentName = '') {
+        const fullName = parentName ? `${parentName} > ${account.name}` : account.name;
+        const indentedName = '  '.repeat(level) + account.name;
+        const startRow = currentRow;
+        
+        // Calculate totals for this account and all sub-accounts
+        const totals = sortedMonthsArray.map(month => {
+            let total = 0;
+            const monthData = monthlyTotals[month] || {};
+            
+            function sumAccount(acc) {
+                if (monthData[acc.id]) {
+                    total += monthData[acc.id];
+                }
+                if (acc.subAccounts) {
+                    Object.values(acc.subAccounts).forEach(subAcc => {
+                        sumAccount(subAcc);
+                    });
+                }
+            }
+            
+            sumAccount(account);
+            return total;
+        });
+
+        // 1. Add the parent account row first
+        const summaryRow = [indentedName, account.id, '', '', ...totals];
+        wsData.push(summaryRow);
+        outlineLevels[currentRow] = {
+            level,
+            isTransaction: false,
+            isHeader: false
+        };
+        currentRow++;
+
+        // 2. Add transactions for this account (if it's a leaf account)
+        if (!account.subAccounts && transactionsByAccount[account.id]) {
+            transactionsByAccount[account.id].forEach(trans => {
+                const transRow = new Array(headerRow.length).fill('');
+                transRow[0] = '  '.repeat(level + 1) + account.name;  // Indent one more level
+                transRow[1] = account.id;
+                transRow[2] = trans.date;
+                transRow[3] = trans.description;
+                
+                const monthIndex = sortedMonthsArray.findIndex(m => m === trans.monthKey);
+                if (monthIndex !== -1) {
+                    transRow[4 + monthIndex] = trans.amount;
+                }
+                
+                wsData.push(transRow);
+                outlineLevels[currentRow] = {
+                    level: level + 1,
+                    isTransaction: true,
+                    isHeader: false
+                };
+                currentRow++;
+            });
+        }
+
+        // 3. Add sub-accounts last
+        if (account.subAccounts) {
+            Object.values(account.subAccounts).forEach(subAccount => {
+                addAccountRows(subAccount, level + 1, fullName);
+            });
+        }
+
+        return {
+            totals,
+            startRow,
+            endRow: currentRow - 1,
+            level
+        };
+    }
+
+    // Track outline levels for each row
+    const outlineLevels = {};
+
+    // Add header row
+    wsData.push(headerRow);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+    currentRow++;
+
+    // Add income section
+    wsData.push(['INCOME', '', '', '', ...sortedMonthsArray.map(() => '')]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+    currentRow++;
+    const incomeSection = addAccountRows(CHART_OF_ACCOUNTS.income, 1);
+
+    // Add total income row
+    wsData.push(['Total Income', '', '', '', ...incomeSection.totals]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+    currentRow++;
+    
+    wsData.push(['', '', '', '', ...sortedMonthsArray.map(() => '')]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: false };
+    currentRow++;
+
+    // Add expenses section
+    wsData.push(['EXPENSES', '', '', '', ...sortedMonthsArray.map(() => '')]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+    currentRow++;
+    const expenseSection = addAccountRows(CHART_OF_ACCOUNTS.expenses, 1);
+
+    // Add total expenses row
+    wsData.push(['Total Expenses', '', '', '', ...expenseSection.totals]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+    currentRow++;
+    
+    wsData.push(['', '', '', '', ...sortedMonthsArray.map(() => '')]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: false };
+    currentRow++;
+
+    // Add net income row
+    const netIncome = incomeSection.totals.map((inc, idx) => inc - expenseSection.totals[idx]);
+    wsData.push(['Net Income', '', '', '', ...netIncome]);
+    outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
+
+    // Create workbook and worksheet
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+    // Set column widths
+    ws['!cols'] = [
+        { wch: 40 },  // Account name
+        { wch: 10 },  // Account ID
+        { wch: 12 },  // Date
+        { wch: 40 },  // Description
+        ...sortedMonthsArray.map(() => ({ wch: 15 }))  // Month columns
+    ];
+
+    // Apply styles
+    const headerStyle = { font: { bold: true }, fill: { fgColor: { rgb: "CCCCCC" } } };
+    const totalStyle = { font: { bold: true } };
+    const currencyFormat = '#,##0.00';
+    const dateFormat = 'yyyy-mm-dd';
+
+    // Initialize outline levels
+    ws['!rows'] = [];
+
+    // Apply styles and create outline structure
+    for (let i = 0; i < wsData.length; i++) {
+        // Set row in worksheet
+        ws['!rows'][i] = ws['!rows'][i] || {};
+        const row = ws['!rows'][i];
+        const levelInfo = outlineLevels[i];
+
+        if (levelInfo) {
+            row.level = levelInfo.level;
+            if (levelInfo.isTransaction) {
+                row.hidden = true;
+            }
+        }
+
+        // Apply cell styles
+        for (let j = 0; j < wsData[i].length; j++) {
+            const cellRef = XLSX.utils.encode_cell({ r: i, c: j });
+            if (!ws[cellRef]) ws[cellRef] = { v: wsData[i][j] };
+            
+            // Style headers
+            if (i === 0 || levelInfo?.isHeader) {
+                ws[cellRef].s = headerStyle;
+            }
+            
+            // Format dates
+            if (j === 2 && wsData[i][j]) {
+                ws[cellRef].z = dateFormat;
+            }
+            
+            // Format numbers as currency
+            if (j >= 4 && typeof wsData[i][j] === 'number') {
+                ws[cellRef].z = currencyFormat;
+            }
+        }
+    }
+
+    // Add outline properties
+    ws['!outline'] = { 
+        above: true  // show summary rows above detail
+    };
+
+    // Add the worksheet to the workbook
+    XLSX.utils.book_append_sheet(wb, ws, 'Statement of Activity');
+
+    // Write to file
+    XLSX.writeFile(wb, 'statement-of-activity.xlsx');
+    console.log('Statement of activity has been written to statement-of-activity.xlsx');
+}
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
+// await processTransactions('test.csv');
 
-await processTransactions('test.csv');
+// Generate statement of activity
+console.log('\nGenerating Statement of Activity:');
+await generateStatementOfActivity('processed.csv');
