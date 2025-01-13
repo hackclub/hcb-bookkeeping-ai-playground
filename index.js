@@ -1,10 +1,11 @@
 import 'dotenv/config';
 import { openai } from '@ai-sdk/openai';
-import { generateObject } from 'ai';
+import { generateObject, generateText, tool } from 'ai';
 import { z } from 'zod';
 import { parse } from 'csv-parse/sync';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import * as XLSX from 'xlsx';
+import fs from 'fs';
 
 const aiModel = openai('gpt-4o');
 
@@ -669,4 +670,115 @@ console.log('\nProcessing transactions from test.csv:');
 
 // Generate statement of activity
 console.log('\nGenerating Statement of Activity:');
-await generateStatementOfActivity('processed.csv');
+// await generateStatementOfActivity('processed.csv');
+
+async function extractReceiptDetails(imageUrl, metadata = {}) {
+    return new Promise(async (resolve, reject) => {
+        let imageData;
+
+        console.log(imageUrl)
+
+        if (imageUrl.toLowerCase().endsWith('.pdf')) {
+            // Create tmp directory if it doesn't exist
+            if (!existsSync('./tmp')) {
+                fs.mkdirSync('./tmp');
+            }
+
+            // Download PDF
+            const pdfPath = './tmp/receipt.pdf';
+            const pdfResponse = await fetch(imageUrl);
+            const pdfBuffer = await pdfResponse.arrayBuffer();
+            fs.writeFileSync(pdfPath, Buffer.from(pdfBuffer));
+
+            // Convert PDF to JPEG using ImageMagick with background preservation and multi-page support
+            const jpegBasePath = './tmp/receipt';
+            // First convert PDF pages to individual JPEGs
+            await new Promise((resolve, reject) => {
+                require('imagemagick').convert([
+                    '-density', '300',
+                    '-quality', '100',
+                    '-background', 'white',
+                    '-alpha', 'on',
+                    pdfPath,
+                    `${jpegBasePath}-%d.jpg`
+                ], (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+
+            // Read all generated JPEGs (limit to first 3)
+            const jpegFiles = fs.readdirSync('./tmp')
+                .filter(f => f.startsWith('receipt-') && f.endsWith('.jpg'))
+                .sort()
+                .slice(0, 3); // Only take first 3 pages
+
+            if (jpegFiles.length === 1) {
+                // If single page, just read the file
+                imageData = fs.readFileSync(`./tmp/${jpegFiles[0]}`);
+            } else {
+                // For multiple pages, vertically append them
+                await new Promise((resolve, reject) => {
+                    require('imagemagick').convert([
+                        ...jpegFiles.map(f => `./tmp/${f}`),
+                        '-append',
+                        './tmp/combined.jpg'
+                    ], (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+                imageData = fs.readFileSync('./tmp/combined.jpg');
+            }
+
+            // Clean up temporary files
+            fs.unlinkSync(pdfPath);
+            jpegFiles.forEach(file => fs.unlinkSync(`./tmp/${file}`));
+            if (jpegFiles.length > 1) {
+                fs.unlinkSync('./tmp/combined.jpg');
+            }
+        } else {
+            imageData = new URL(imageUrl);
+        }
+
+        await generateText({
+            model: aiModel,
+            messages: [
+                {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: 'Extract the receipt details from this image. Additional context: ' + JSON.stringify(metadata) },
+                        {
+                            type: 'image',
+                            image: imageData,
+                        },
+                    ],
+                },
+            ],
+            tools: {
+                extractReceipt: tool({
+                    description: 'Extract details from a receipt',
+                    parameters: z.object({
+                        date: z.string().describe('ISO8601 date string'),
+                        vendor_name: z.string(), 
+                        vendor_address: z.string(), 
+                        items_purchased: z.array(z.object({
+                            qty: z.number(),
+                            memo: z.string().describe('Exact text from the receipt'),
+                            amount_cents: z.number(),
+                        })),
+                        subtotal_amount_cents: z.number(),
+                        taxes: z.array(z.object({
+                            memo: z.string(),
+                            amount_cents: z.number(),
+                        })),
+                        total_amount_cents: z.number()
+                    }),
+                    execute(receipt) {
+                        return resolve(receipt)
+                    }
+                })
+            }
+        });
+    });
+}
