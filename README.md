@@ -7,3 +7,7 @@ Give it an input CSV at `test.csv` and it will output a processed CSV at
 `statement_of_activity.xlsx`.
 
 Written with the help of AI.
+
+TODO
+
+- Run a report on all of Counterspell, using this to implement subfunds, detailed transaction metadata, receipt extraction, etc

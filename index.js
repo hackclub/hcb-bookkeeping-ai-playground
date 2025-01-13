@@ -6,6 +6,8 @@ import { parse } from 'csv-parse/sync';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import * as XLSX from 'xlsx';
 
+const aiModel = openai('gpt-4o');
+
 // Chart of Accounts
 const CHART_OF_ACCOUNTS = {
     income: {
@@ -120,7 +122,7 @@ async function identifyFields(headers) {
             dateField: z.string().describe('The CSV header that represents the transaction date'),
             amountField: z.string().describe('The CSV header that represents the transaction amount'),
         }),
-        model: openai('gpt-4'),
+        model: aiModel,
         prompt: `Given these CSV headers: ${headers.join(', ')}\nIdentify which header represents the transaction date and which represents the transaction amount/value.`
     });
     return object;
@@ -246,7 +248,7 @@ async function processTransactions(csvPath) {
                     multipleChoiceOptions: z.array(z.string()).describe("Contains the possible answers. Don't have other as an option. Keep it short")
                 })).describe('Questions to ask the user if you need additional information')
             }),
-            model: openai('gpt-4o'),
+            model: aiModel,
             prompt: `
 You are a bookeeper for a nonprofit organization. You prize accuracy and
 reliability of the books so the money can be spend as effectively as possible.
@@ -323,7 +325,7 @@ Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
                     accountName: z.string().describe('The category for this transaction'),
                     accountId: z.string().describe('The account ID for this transaction')
                 }),
-                model: openai('gpt-4o'),
+                model: aiModel,
                 prompt: `Given the following transaction and user input, determine the category and account ID for the transaction.
                 
                 Transaction: ${JSON.stringify(transaction)}
@@ -663,7 +665,7 @@ async function generateStatementOfActivity(csvPath) {
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
-// await processTransactions('test.csv');
+await processTransactions('test.csv');
 
 // Generate statement of activity
 console.log('\nGenerating Statement of Activity:');
