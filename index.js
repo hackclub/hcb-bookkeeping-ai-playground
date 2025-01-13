@@ -458,26 +458,14 @@ async function generateStatementOfActivity(csvPath) {
     const wsData = [];
     let currentRow = 0;
 
-    // Add header row
-    const headerRow = [
-        'Account', 
-        'Account ID', 
-        'Date',
-        'Description',
-        ...sortedMonthsArray.map(month => {
-            const [year, monthNum] = month.split('-');
-            return new Date(year, monthNum - 1).toLocaleString('default', { month: 'short', year: 'numeric' });
-        })
-    ];
+    // Track outline levels for each row
+    const outlineLevels = {};
 
-    // Helper function to calculate the actual depth of an account in the hierarchy
-    function getAccountDepth(account) {
-        let maxDepth = 0;
-        if (account.subAccounts) {
-            maxDepth = 1 + Math.max(...Object.values(account.subAccounts).map(getAccountDepth));
-        }
-        return maxDepth;
-    }
+    // Create month headers
+    const monthHeaders = sortedMonthsArray.map(month => {
+        const [year, monthNum] = month.split('-');
+        return new Date(parseInt(year), parseInt(monthNum) - 1).toLocaleString('default', { month: 'short', year: 'numeric' });
+    });
 
     // Helper function to add account rows with transactions and proper grouping
     function addAccountRows(account, level = 0, parentName = '') {
@@ -554,10 +542,8 @@ async function generateStatementOfActivity(csvPath) {
         };
     }
 
-    // Track outline levels for each row
-    const outlineLevels = {};
-
     // Add header row
+    const headerRow = ['Account', 'Account ID', 'Date', 'Description', ...monthHeaders];
     wsData.push(headerRow);
     outlineLevels[currentRow] = { level: 0, isTransaction: false, isHeader: true };
     currentRow++;
@@ -613,7 +599,7 @@ async function generateStatementOfActivity(csvPath) {
     // Apply styles
     const headerStyle = { font: { bold: true }, fill: { fgColor: { rgb: "CCCCCC" } } };
     const totalStyle = { font: { bold: true } };
-    const currencyFormat = '#,##0.00';
+    const currencyFormat = '_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)';  // Excel's built-in accounting format
     const dateFormat = 'yyyy-mm-dd';
 
     // Initialize outline levels
@@ -648,9 +634,16 @@ async function generateStatementOfActivity(csvPath) {
                 ws[cellRef].z = dateFormat;
             }
             
-            // Format numbers as currency
-            if (j >= 4 && typeof wsData[i][j] === 'number') {
-                ws[cellRef].z = currencyFormat;
+            // Format numbers as currency (all amount columns and totals)
+            if (j >= 4 && wsData[i][j] !== '') {  // All amount columns
+                const value = wsData[i][j];
+                // Only apply currency format if it's a number or can be parsed as one
+                if (typeof value === 'number' || (typeof value === 'string' && !isNaN(parseFloat(value)))) {
+                    ws[cellRef].z = currencyFormat;
+                    if (typeof value === 'string') {
+                        ws[cellRef].v = parseFloat(value) || 0;
+                    }
+                }
             }
         }
     }
