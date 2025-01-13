@@ -672,11 +672,9 @@ console.log('\nProcessing transactions from test.csv:');
 console.log('\nGenerating Statement of Activity:');
 // await generateStatementOfActivity('processed.csv');
 
-async function extractReceiptDetails(imageUrl, metadata = {}) {
+async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
     return new Promise(async (resolve, reject) => {
         let imageData;
-
-        console.log(imageUrl)
 
         if (imageUrl.toLowerCase().endsWith('.pdf')) {
             // Create tmp directory if it doesn't exist
@@ -781,4 +779,29 @@ async function extractReceiptDetails(imageUrl, metadata = {}) {
             }
         });
     });
+}
+
+async function getReceiptData(transactionId, receiptUrl, metadata = {}) {
+    // Check if cache file exists, if not create it
+    const cacheFile = 'test_data/extracted_receipts.json';
+    if (!existsSync(cacheFile)) {
+        writeFileSync(cacheFile, JSON.stringify({}));
+    }
+
+    // Read cached data
+    const cachedData = JSON.parse(readFileSync(cacheFile, 'utf8'));
+
+    // Check if transaction is cached
+    if (cachedData[transactionId]) {
+        return cachedData[transactionId];
+    }
+
+    // Extract receipt data if not cached
+    const extractedData = await aiExtractReceiptDetails(receiptUrl, metadata);
+
+    // Cache the result
+    cachedData[transactionId] = extractedData;
+    writeFileSync(cacheFile, JSON.stringify(cachedData, null, 2));
+
+    return extractedData;
 }
