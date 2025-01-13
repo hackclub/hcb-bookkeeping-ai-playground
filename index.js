@@ -209,6 +209,7 @@ function createTransactionKey(transaction) {
 
 // Function to process all transactions
 async function processTransactions(csvPath) {
+    const CHUNK_SIZE = 1000; // Define a chunk size for processing
     const transactions = await loadTransactions(csvPath);
     console.log(`Loaded ${transactions.length} transactions`);
 
@@ -227,27 +228,31 @@ async function processTransactions(csvPath) {
         });
     }
 
-    // Process each transaction
-    for (const transaction of transactions) {
-        // Create unique key for matching
-        const transactionKey = createTransactionKey(transaction);
-        
-        if (processedTransactions.has(transactionKey)) {
-            console.log('Skipping already processed transaction:', transactionKey);
-            continue;
-        }
+    // Process transactions in chunks
+    for (let i = 0; i < transactions.length; i += CHUNK_SIZE) {
+        const chunk = transactions.slice(i, i + CHUNK_SIZE);
+        console.log(`Processing chunk ${i / CHUNK_SIZE + 1} of ${Math.ceil(transactions.length / CHUNK_SIZE)}`);
 
-        const { object } = await generateObject({
-            schema: z.object({
-                accountName: z.string().describe('The name of the account in the chart of accounts'),
-                accountId: z.string().describe('The ID of the account in the chart of accounts'),
-                questions: z.array(z.object({
-                    thoughtfulQuestion: z.string().describe("Keep it concise. Don't repeat transaction info or answers."),
-                    multipleChoiceOptions: z.array(z.string()).describe("Contains the possible answers. Don't have other as an option. Keep it short")
-                })).describe('Questions to ask the user if you need additional information')
-            }),
-            model: openai('gpt-4o'),
-            prompt: `
+        for (const transaction of chunk) {
+            // Create unique key for matching
+            const transactionKey = createTransactionKey(transaction);
+            
+            if (processedTransactions.has(transactionKey)) {
+                console.log('Skipping already processed transaction:', transactionKey);
+                continue;
+            }
+
+            const { object } = await generateObject({
+                schema: z.object({
+                    accountName: z.string().describe('The name of the account in the chart of accounts'),
+                    accountId: z.string().describe('The ID of the account in the chart of accounts'),
+                    questions: z.array(z.object({
+                        thoughtfulQuestion: z.string().describe("Keep it concise. Don't repeat transaction info or answers."),
+                        multipleChoiceOptions: z.array(z.string()).describe("Contains the possible answers. Don't have other as an option. Keep it short")
+                    })).describe('Questions to ask the user if you need additional information')
+                }),
+                model: openai('gpt-4o'),
+                prompt: `
 You are a bookeeper for a nonprofit organization. You prize accuracy and
 reliability of the books so the money can be spend as effectively as possible.
 
@@ -265,149 +270,152 @@ Transaction (amount is in cents): ${JSON.stringify(transaction)}
 
 Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
 `
-        });
-
-        let accountName = object.accountName;
-        let accountId = object.accountId;
-
-        let questions = object.questions;
-
-        if (questions && questions.length > 0) {
-            const question = questions[0];
-
-            // Display transaction details in a pretty format
-            console.log('\nTransaction Details:');
-            console.log('-------------------');
-            console.log(`Date: ${transaction.date?.toLocaleDateString()}`);
-            console.log(`Amount: $${(transaction.amount/100).toFixed(2)}`);
-            console.log(`Description: ${transaction.description || 'N/A'}`);
-            console.log(`Memo: ${transaction.memo || 'N/A'}`);
-            if (transaction.comments) {
-                console.log(`Comments: ${transaction.comments}`);
-            }
-            console.log('-------------------\n');
-
-            // Get user input via readline
-            const readline = require('readline').createInterface({
-                input: process.stdin,
-                output: process.stdout
             });
 
-            const selectedAnswer = await new Promise(resolve => {
-                // First display the question
-                console.log(question.thoughtfulQuestion);
-                
-                // Then show the multiple choice options
-                console.log('');
-                question.multipleChoiceOptions.forEach((option, i) => {
-                    console.log(`${i + 1}. ${option}`);
-                });
+            let accountName = object.accountName;
+            let accountId = object.accountId;
 
-                readline.question('\nPick an option (or type any custom response): ', answer => {
-                    const num = parseInt(answer);
-                    if (num >= 1 && num <= question.multipleChoiceOptions.length) {
-                        // If they entered a valid number, use that choice
-                        resolve(question.multipleChoiceOptions[num - 1]);
-                    } else {
-                        // Otherwise treat their input as a custom answer
-                        resolve(answer.trim());
-                    }
-                    readline.close();
-                });
-            });
+            let questions = object.questions;
 
-            console.log(`\nRecorded answer: ${selectedAnswer}\n`);
+            if (questions && questions.length > 0) {
+                const question = questions[0];
 
-            const { object: categorization } = await generateObject({
-                schema: z.object({
-                    accountName: z.string().describe('The category for this transaction'),
-                    accountId: z.string().describe('The account ID for this transaction')
-                }),
-                model: openai('gpt-4o'),
-                prompt: `Given the following transaction and user input, determine the category and account ID for the transaction.
-                
-                Transaction: ${JSON.stringify(transaction)}
-                Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
-                
-                Question: ${question.thoughtfulQuestion}
-                User's answer: ${selectedAnswer}
-                
-                Based on this information, determine the appropriate category and account ID.`
-            });
-
-            accountName = categorization.accountName;
-            accountId = categorization.accountId;
-        }
-
-        // Get account name from chart of accounts and format with parent hierarchy
-        const getFullAccountName = (accountId) => {
-            const parts = [];
-            
-            // Helper function to search through nested accounts
-            const findAccount = (obj) => {
-                if (obj.id === accountId) return obj;
-                if (obj.subAccounts) {
-                    for (const subAccount of Object.values(obj.subAccounts)) {
-                        const found = findAccount(subAccount);
-                        if (found) return found;
-                    }
+                // Display transaction details in a pretty format
+                console.log('\nTransaction Details:');
+                console.log('-------------------');
+                console.log(`Date: ${transaction.date?.toLocaleDateString()}`);
+                console.log(`Amount: $${(transaction.amount/100).toFixed(2)}`);
+                console.log(`Description: ${transaction.description || 'N/A'}`);
+                console.log(`Memo: ${transaction.memo || 'N/A'}`);
+                if (transaction.comments) {
+                    console.log(`Comments: ${transaction.comments}`);
                 }
-                return null;
+                console.log('-------------------\n');
+
+                // Get user input via readline
+                const readline = require('readline').createInterface({
+                    input: process.stdin,
+                    output: process.stdout
+                });
+
+                const selectedAnswer = await new Promise(resolve => {
+                    // First display the question
+                    console.log(question.thoughtfulQuestion);
+                    
+                    // Then show the multiple choice options
+                    console.log('');
+                    question.multipleChoiceOptions.forEach((option, i) => {
+                        console.log(`${i + 1}. ${option}`);
+                    });
+
+                    readline.question('\nPick an option (or type any custom response): ', answer => {
+                        const num = parseInt(answer);
+                        if (num >= 1 && num <= question.multipleChoiceOptions.length) {
+                            // If they entered a valid number, use that choice
+                            resolve(question.multipleChoiceOptions[num - 1]);
+                        } else {
+                            // Otherwise treat their input as a custom answer
+                            resolve(answer.trim());
+                        }
+                        readline.close();
+                    });
+                });
+
+                console.log(`\nRecorded answer: ${selectedAnswer}\n`);
+
+                const { object: categorization } = await generateObject({
+                    schema: z.object({
+                        accountName: z.string().describe('The category for this transaction'),
+                        accountId: z.string().describe('The account ID for this transaction')
+                    }),
+                    model: openai('gpt-4o'),
+                    prompt: `Given the following transaction and user input, determine the category and account ID for the transaction.
+                    
+                    Transaction: ${JSON.stringify(transaction)}
+                    Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
+                    
+                    Question: ${question.thoughtfulQuestion}
+                    User's answer: ${selectedAnswer}
+                    
+                    Based on this information, determine the appropriate category and account ID.`
+                });
+
+                accountName = categorization.accountName;
+                accountId = categorization.accountId;
+            }
+
+            // Get account name from chart of accounts and format with parent hierarchy
+            const getFullAccountName = (accountId) => {
+                const parts = [];
+                
+                // Helper function to search through nested accounts
+                const findAccount = (obj) => {
+                    if (obj.id === accountId) return obj;
+                    if (obj.subAccounts) {
+                        for (const subAccount of Object.values(obj.subAccounts)) {
+                            const found = findAccount(subAccount);
+                            if (found) return found;
+                        }
+                    }
+                    return null;
+                };
+                
+                // Search through top level accounts
+                let current = null;
+                for (const topAccount of Object.values(CHART_OF_ACCOUNTS)) {
+                    current = findAccount(topAccount);
+                    if (current) break;
+                }
+                
+                // Build the hierarchy path
+                while (current) {
+                    parts.unshift(current.name);
+                    // Search for parent by looking through all accounts again
+                    const parentId = current.parentId;
+                    current = parentId ? findAccount(CHART_OF_ACCOUNTS) : null;
+                }
+                
+                return parts.join(' > ');
             };
-            
-            // Search through top level accounts
-            let current = null;
-            for (const topAccount of Object.values(CHART_OF_ACCOUNTS)) {
-                current = findAccount(topAccount);
-                if (current) break;
-            }
-            
-            // Build the hierarchy path
-            while (current) {
-                parts.unshift(current.name);
-                // Search for parent by looking through all accounts again
-                const parentId = current.parentId;
-                current = parentId ? findAccount(CHART_OF_ACCOUNTS) : null;
-            }
-            
-            return parts.join(' > ');
-        };
-        transaction.accountName = getFullAccountName(accountId);
-        transaction.accountId = accountId;
+            transaction.accountName = getFullAccountName(accountId);
+            transaction.accountId = accountId;
 
-        // Prepare CSV fields with proper escaping
-        const fields = [
-            transaction.date ? transaction.date.toISOString() : '',
-            transaction.amount,
-            transaction.category || '',
-            transaction.accountId || '',
-            ...Object.values(transaction).slice(4)
-        ].map(escapeCsvField);
-
-        // Save to processed.csv
-        const csvLine = fields.join(',') + '\n';
-        
-        if (!existsSync('processed.csv')) {
-            const headerFields = [
-                'date',
-                'amount',
-                'category',
-                'accountId',
-                ...Object.keys(transaction).slice(4)
+            // Prepare CSV fields with proper escaping
+            const fields = [
+                transaction.date ? transaction.date.toISOString() : '',
+                transaction.amount,
+                transaction.category || '',
+                transaction.accountId || '',
+                ...Object.values(transaction).slice(4)
             ].map(escapeCsvField);
+
+            // Save to processed.csv
+            const csvLine = fields.join(',') + '\n';
             
-            writeFileSync('processed.csv', headerFields.join(',') + '\n');
+            if (!existsSync('processed.csv')) {
+                const headerFields = [
+                    'date',
+                    'amount',
+                    'category',
+                    'accountId',
+                    ...Object.keys(transaction).slice(4)
+                ].map(escapeCsvField);
+                
+                writeFileSync('processed.csv', headerFields.join(',') + '\n');
+            }
+            
+            writeFileSync('processed.csv', csvLine, { flag: 'a' });
+            processedTransactions.add(transactionKey);
         }
-        
-        writeFileSync('processed.csv', csvLine, { flag: 'a' });
-        processedTransactions.add(transactionKey);
     }
 
     return transactions;
 }
 
 async function generateStatementOfActivity(csvPath) {
-    // Load and parse processed.csv
+    const CHUNK_SIZE = 1000; // Define a chunk size for processing
+
+    // Load and parse processed.csv in chunks
     const fileContent = readFileSync(csvPath, 'utf-8');
     const records = parse(fileContent, CSV_PARSE_OPTIONS);
 
@@ -424,33 +432,38 @@ async function generateStatementOfActivity(csvPath) {
     const monthlyTotals = {};
     const sortedMonths = new Set();
     
-    records.forEach(record => {
-        const date = new Date(record[dateField]);
-        const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-        sortedMonths.add(monthKey);
-        const amount = parseFloat(record[amountField]) / 100;
-        const accountId = record[accountIdField];
+    for (let i = 0; i < records.length; i += CHUNK_SIZE) {
+        const chunk = records.slice(i, i + CHUNK_SIZE);
+        console.log(`Processing chunk ${i / CHUNK_SIZE + 1} of ${Math.ceil(records.length / CHUNK_SIZE)}`);
 
-        // Store transaction by account
-        if (!transactionsByAccount[accountId]) {
-            transactionsByAccount[accountId] = [];
-        }
-        transactionsByAccount[accountId].push({
-            date: date.toISOString().split('T')[0],
-            amount,
-            description: record.description || record.memo || '',
-            monthKey
+        chunk.forEach(record => {
+            const date = new Date(record[dateField]);
+            const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+            sortedMonths.add(monthKey);
+            const amount = parseFloat(record[amountField]) / 100;
+            const accountId = record[accountIdField];
+
+            // Store transaction by account
+            if (!transactionsByAccount[accountId]) {
+                transactionsByAccount[accountId] = [];
+            }
+            transactionsByAccount[accountId].push({
+                date: date.toISOString().split('T')[0],
+                amount,
+                description: record.description || record.memo || '',
+                monthKey
+            });
+
+            // Update monthly totals
+            if (!monthlyTotals[monthKey]) {
+                monthlyTotals[monthKey] = {};
+            }
+            if (!monthlyTotals[monthKey][accountId]) {
+                monthlyTotals[monthKey][accountId] = 0;
+            }
+            monthlyTotals[monthKey][accountId] += amount;
         });
-
-        // Update monthly totals
-        if (!monthlyTotals[monthKey]) {
-            monthlyTotals[monthKey] = {};
-        }
-        if (!monthlyTotals[monthKey][accountId]) {
-            monthlyTotals[monthKey][accountId] = 0;
-        }
-        monthlyTotals[monthKey][accountId] += amount;
-    });
+    }
 
     const sortedMonthsArray = Array.from(sortedMonths).sort();
 
