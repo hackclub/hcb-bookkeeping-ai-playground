@@ -115,6 +115,24 @@ const CHART_OF_ACCOUNTS = {
         }
     }
 };
+// Function to print chart of accounts in a formatted way
+function printChartOfAccounts(accounts = CHART_OF_ACCOUNTS, level = 0) {
+    let output = '';
+    for (const [key, account] of Object.entries(accounts)) {
+        // Skip if not a proper account object
+        if (!account.name) continue;
+        
+        // Add current account with indentation to output string
+        output += `${'    '.repeat(level)}${account.name}${account.id ? ` (id: ${account.id})` : ''}\n`;
+        
+        // Recursively add sub-accounts if they exist
+        if (account.subAccounts) {
+            output += printChartOfAccounts(account.subAccounts, level + 1);
+        }
+    }
+    return output;
+}
+
 
 // Transaction processing functions
 async function identifyFields(headers) {
@@ -169,8 +187,16 @@ async function loadTransactions(csvPath) {
     return records.map((record, index) => {
         // First, process date and amount
         const date = dateField && record[dateField] ? new Date(record[dateField]) : null;
-        const amount = amountField && record[amountField] ? 
-            parseFloat(record[amountField].replace(/[$,]/g, '')) : null;
+        // Parse amount and format as currency string
+        let amountStr = null;
+        if (amountField && record[amountField]) {
+            const amountNum = parseFloat(record[amountField].replace(/[$,]/g, '')) / 100;
+            if (!isNaN(amountNum)) {
+                amountStr = amountNum < 0 ? 
+                    `-$${Math.abs(amountNum).toFixed(2)}` :
+                    `$${amountNum.toFixed(2)}`;
+            }
+        }
 
         // Create remaining fields object excluding date and amount
         const remainingFields = {};
@@ -183,7 +209,7 @@ async function loadTransactions(csvPath) {
         // Return object in specified order
         return {
             date,
-            amount,
+            amount: amountStr,
             category: null,
             accountId: null,
             ...remainingFields
@@ -193,21 +219,49 @@ async function loadTransactions(csvPath) {
 
 // Function to create a unique transaction key
 function createTransactionKey(transaction) {
-    // Format date to YYYY-MM-DD for consistent matching
-    const dateStr = transaction.date instanceof Date ? 
-        transaction.date.toISOString().split('T')[0] : 
-        (transaction.date || '');
+    // Just return the id field as the key
+    return transaction.id || '';
+}
+// Function to serialize transaction data, excluding URL fields and empty values
+// to limit token usage
+function serializeTransaction(transaction) {
+    const serialized = {};
+    
+    for (const [key, value] of Object.entries(transaction)) {
+        // Skip if value is null/undefined/empty string
+        if (value == null || value === '') {
+            continue;
+        }
 
-    // Format amount to fixed decimal places for consistent matching
-    const amountStr = typeof transaction.amount === 'number' ? 
-        transaction.amount.toFixed(2) : 
-        (transaction.amount || '');
+        // Skip if value is a URL string
+        if (typeof value === 'string' && (
+            value.startsWith('http://') || 
+            value.startsWith('https://') ||
+            value.startsWith('data:') ||
+            value instanceof URL
+        )) {
+            continue;
+        }
 
-    // Get description or memo or reference - whatever is available
-    const descStr = transaction.description || transaction.memo || '';
+        // Handle Date objects
+        if (value instanceof Date) {
+            serialized[key] = value.toISOString();
+            continue;
+        }
 
-    // Combine fields into a unique key
-    return `${dateStr}|${amountStr}|${descStr}`.toLowerCase().trim();
+        // Handle nested objects
+        if (typeof value === 'object' && !Array.isArray(value)) {
+            const nested = serializeTransaction(value);
+            if (Object.keys(nested).length > 0) {
+                serialized[key] = nested;
+            }
+            continue;
+        }
+
+        serialized[key] = value;
+    }
+
+    return JSON.stringify(serialized);
 }
 
 // Function to process all transactions
@@ -221,10 +275,7 @@ async function processTransactions(csvPath) {
         const processed = parse(readFileSync('processed.csv', 'utf-8'), CSV_PARSE_OPTIONS);
         processed.forEach(record => {
             const key = createTransactionKey({
-                date: record.date ? new Date(record.date) : null,
-                amount: record.amount ? parseFloat(record.amount) : null,
-                description: record.description,
-                memo: record.memo
+                id: record.id,
             });
             processedTransactions.add(key);
         });
@@ -238,6 +289,29 @@ async function processTransactions(csvPath) {
         if (processedTransactions.has(transactionKey)) {
             console.log('Skipping already processed transaction:', transactionKey);
             continue;
+        }
+
+        // Find all fields containing both 'receipt' and 'url'
+        const receiptUrlFields = Object.keys(transaction).filter(field => 
+            field.toLowerCase().includes('receipt') && 
+            field.toLowerCase().includes('url')
+        );
+
+        // Extract receipt data for each receipt URL field
+        for (const urlField of receiptUrlFields) {
+            const receiptUrl = transaction[urlField];
+            if (receiptUrl) {
+                try {
+                    // Get receipt data (this will use cache if available)
+                    const receiptData = await getReceiptData(`${transaction.id}-${urlField}`, receiptUrl);
+
+                    // Store receipt data in a new field named after the URL field
+                    transaction[`${urlField}.extracted_contents`] = receiptData;
+                } catch (error) {
+                    console.error(`Failed to extract receipt data from ${urlField}:`, error);
+                    transaction[`${urlField}.extracted_contents`] = null;
+                }
+            }
         }
 
         const { object } = await generateObject({
@@ -255,7 +329,9 @@ You are a bookeeper for a nonprofit organization. You prize accuracy and
 reliability of the books so the money can be spend as effectively as possible.
 
 Given the following transaction and chart of accounts, determine the account
-name and account ID for the transaction.
+name and account ID for the transaction.  Read all the fields in transaction and
+look for merchant name and receipt data that can help. Look at whether the
+amount is positive or negative. Positive = income, negative = expense.
 
 The nonprofit's staff are very busy, so if you can accurately categorize without
 asking any questions - do so. But accuracy is important, so if you need more
@@ -264,9 +340,10 @@ to determine where in the chart of accounts the transaction belongs.
 
 You only get 1 chance to ask the user for information, so make it count.
 
-Transaction (amount is in cents): ${JSON.stringify(transaction)}
+Transaction (amount is in cents): ${serializeTransaction(transaction)}
 
-Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
+Chart of Accounts:
+${printChartOfAccounts()}
 `
         });
 
@@ -282,11 +359,17 @@ Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
             console.log('\nTransaction Details:');
             console.log('-------------------');
             console.log(`Date: ${transaction.date?.toLocaleDateString()}`);
-            console.log(`Amount: $${(transaction.amount/100).toFixed(2)}`);
+            console.log(`Amount: ${transaction.amount}`);
             console.log(`Description: ${transaction.description || 'N/A'}`);
             console.log(`Memo: ${transaction.memo || 'N/A'}`);
             if (transaction.comments) {
                 console.log(`Comments: ${transaction.comments}`);
+            }
+            // Display receipt URLs if they exist
+            for (const [key, value] of Object.entries(transaction)) {
+                if (key.endsWith('.url') && value) {
+                    console.log(`Receipt: ${value}`);
+                }
             }
             console.log('-------------------\n');
 
@@ -327,10 +410,11 @@ Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
                     accountId: z.string().describe('The account ID for this transaction')
                 }),
                 model: aiModel,
-                prompt: `Given the following transaction and user input, determine the category and account ID for the transaction.
+                prompt: `Given the following transaction and user input, determine the category and account ID for the transaction. Read all the fields in transaction, there may be metadata or receipt data that can help. Look at whether the amount is positive or negative. Positive = income, negative = expense.
                 
-                Transaction: ${JSON.stringify(transaction)}
-                Chart of Accounts: ${JSON.stringify(CHART_OF_ACCOUNTS)}
+                Transaction: ${serializeTransaction(transaction)}
+                Chart of Accounts:
+${printChartOfAccounts()}
                 
                 Question: ${question.thoughtfulQuestion}
                 User's answer: ${selectedAnswer}
@@ -664,14 +748,6 @@ async function generateStatementOfActivity(csvPath) {
     console.log('Statement of activity has been written to statement-of-activity.xlsx');
 }
 
-// Test code for loading transactions
-console.log('\nProcessing transactions from test.csv:');
-// await processTransactions('test.csv');
-
-// Generate statement of activity
-console.log('\nGenerating Statement of Activity:');
-// await generateStatementOfActivity('processed.csv');
-
 async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
     return new Promise(async (resolve, reject) => {
         let imageData;
@@ -745,7 +821,7 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
                 {
                     role: 'user',
                     content: [
-                        { type: 'text', text: 'Extract the receipt details from this image. Additional context: ' + JSON.stringify(metadata) },
+                        { type: 'text', text: 'Extract the receipt details from this image. You must call one of the tools. Additional context: ' + JSON.stringify(metadata) },
                         {
                             type: 'image',
                             image: imageData,
@@ -757,23 +833,33 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
                 extractReceipt: tool({
                     description: 'Extract details from a receipt',
                     parameters: z.object({
-                        date: z.string().describe('ISO8601 date string'),
-                        vendor_name: z.string(), 
-                        vendor_address: z.string(), 
+                        date: z.string().describe('ISO8601 date string').optional(),
+                        vendor_name: z.string().optional(), 
+                        vendor_address: z.string().optional(), 
                         items_purchased: z.array(z.object({
                             qty: z.number(),
                             memo: z.string().describe('Exact text from the receipt'),
                             amount_cents: z.number(),
-                        })),
-                        subtotal_amount_cents: z.number(),
+                        })).optional(),
+                        subtotal_amount_cents: z.number().optional(),
                         taxes: z.array(z.object({
                             memo: z.string(),
                             amount_cents: z.number(),
-                        })),
-                        total_amount_cents: z.number()
+                        })).optional(),
+                        total_amount_cents: z.number().optional(),
                     }),
                     execute(receipt) {
                         return resolve(receipt)
+                    }
+                }),
+                error: tool({
+                    description: 'Return an error message if the receipt is invalid',
+                    parameters: z.object({
+                        imageDescription: z.string(),
+                        error: z.string(),
+                    }),
+                    execute(error) {
+                        return resolve(error)
                     }
                 })
             }
@@ -781,7 +867,7 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
     });
 }
 
-async function getReceiptData(transactionId, receiptUrl, metadata = {}) {
+async function getReceiptData(receiptId, receiptUrl, metadata = {}) {
     // Check if cache file exists, if not create it
     const cacheFile = 'test_data/extracted_receipts.json';
     if (!existsSync(cacheFile)) {
@@ -792,16 +878,24 @@ async function getReceiptData(transactionId, receiptUrl, metadata = {}) {
     const cachedData = JSON.parse(readFileSync(cacheFile, 'utf8'));
 
     // Check if transaction is cached
-    if (cachedData[transactionId]) {
-        return cachedData[transactionId];
+    if (cachedData[receiptId]) {
+        return cachedData[receiptId];
     }
 
     // Extract receipt data if not cached
     const extractedData = await aiExtractReceiptDetails(receiptUrl, metadata);
 
     // Cache the result
-    cachedData[transactionId] = extractedData;
+    cachedData[receiptId] = extractedData;
     writeFileSync(cacheFile, JSON.stringify(cachedData, null, 2));
 
     return extractedData;
 }
+
+// Test code for loading transactions
+console.log('\nProcessing transactions from test.csv:');
+await processTransactions('hcb_transactions.csv');
+
+// Generate statement of activity
+console.log('\nGenerating Statement of Activity:');
+await generateStatementOfActivity('processed.csv');
