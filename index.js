@@ -247,11 +247,18 @@ async function processTransactions(csvPath) {
             }),
             model: openai('gpt-4o'),
             prompt: `
-Given the following transaction and chart of accounts, determine the account name and account ID for the transaction.
+You are a bookeeper for a nonprofit organization. You prize accuracy and
+reliability of the books so the money can be spend as effectively as possible.
 
-You can ask the user 1 or 2 well-thought-out follow up question if you need additional information to determine where in the chart of accounts the transaction belongs. You can ask multiple choice questions.
+Given the following transaction and chart of accounts, determine the account
+name and account ID for the transaction.
 
-You only get 1 chance to ask the user for information.
+The nonprofit's staff are very busy, so if you can accurately categorize without
+asking any questions - do so. But accuracy is important, so if you need more
+info, you can ask the user 1 or 2 well-thought-out follow up question if you
+to determine where in the chart of accounts the transaction belongs.
+
+You only get 1 chance to ask the user for information, so make it count.
 
 Transaction: ${JSON.stringify(transaction)}
 
