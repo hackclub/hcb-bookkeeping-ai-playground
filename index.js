@@ -665,7 +665,7 @@ async function generateStatementOfActivity(csvPath) {
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
-await processTransactions('test.csv');
+// await processTransactions('test.csv');
 
 // Generate statement of activity
 console.log('\nGenerating Statement of Activity:');

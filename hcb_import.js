@@ -1,10 +1,45 @@
 import 'dotenv/config';
 
+// Rate limiter implementation - 900 requests per 5 minutes
+class RateLimiter {
+  constructor(maxTokens, refillInterval) {
+    this.maxTokens = maxTokens;
+    this.tokens = maxTokens;
+    this.lastRefill = Date.now();
+    this.refillInterval = refillInterval;
+  }
+
+  async getToken() {
+    const now = Date.now();
+    const timePassed = now - this.lastRefill;
+    
+    // Refill tokens based on time passed
+    if (timePassed >= this.refillInterval) {
+      this.tokens = this.maxTokens;
+      this.lastRefill = now;
+    }
+
+    if (this.tokens <= 0) {
+      // Wait until next refill
+      const waitTime = this.refillInterval - timePassed;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      this.tokens = this.maxTokens;
+      this.lastRefill = Date.now();
+    }
+
+    this.tokens--;
+  }
+}
+
+// Initialize rate limiter - 900 requests per 5 minutes
+const rateLimiter = new RateLimiter(900, 5 * 60 * 1000);
+
 const counterspellsData = await Bun.file(
   './test_data/counterspell/counterspells.json'
 ).json();
 
 async function fetchReceipts(organizationId, transactionId) {
+  await rateLimiter.getToken();
   const url = `https://hcb.hackclub.com/api/v4/organizations/${organizationId}/transactions/${transactionId}/receipts`;
   const response = await fetch(url, {
     headers: {
@@ -28,6 +63,7 @@ async function fetchAllTransactions(organizationId) {
   const limit = 25;
 
   while (hasMore) {
+    await rateLimiter.getToken();
     const url = `https://hcb.hackclub.com/api/v4/organizations/${organizationId}/transactions${after ? `?after=${after}&limit=${limit}` : `?limit=${limit}`}`;
     const response = await fetch(url, {
       headers: {
@@ -54,9 +90,6 @@ async function fetchAllTransactions(organizationId) {
     if (hasMore && data.data.length > 0) {
       after = data.data[data.data.length - 1].id;
     }
-    
-    // Add a small delay to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 100));
   }
 
   return transactions;
