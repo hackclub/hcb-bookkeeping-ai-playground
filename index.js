@@ -758,31 +758,35 @@ async function generateStatementOfActivity(csvPath) {
 }
 
 async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
-    console.log(imageUrl)
     return new Promise(async (resolve, reject) => {
         let imageData;
 
+        // Create unique ID for this request to avoid filename collisions
+        const requestId = crypto.randomUUID();
+        const tmpDir = './tmp';
+
         if (imageUrl.toLowerCase().endsWith('.pdf')) {
             // Create tmp directory if it doesn't exist
-            if (!existsSync('./tmp')) {
-                fs.mkdirSync('./tmp');
+            if (!existsSync(tmpDir)) {
+                fs.mkdirSync(tmpDir);
             }
 
             // Download PDF
-            const pdfPath = './tmp/receipt.pdf';
+            const pdfPath = `${tmpDir}/receipt-${requestId}.pdf`;
             const pdfResponse = await fetch(imageUrl);
             const pdfBuffer = await pdfResponse.arrayBuffer();
             fs.writeFileSync(pdfPath, Buffer.from(pdfBuffer));
 
             // Convert PDF to JPEG using ImageMagick with background preservation and multi-page support
-            const jpegBasePath = './tmp/receipt';
+            const jpegBasePath = `${tmpDir}/receipt-${requestId}`;
             // First convert PDF pages to individual JPEGs
             await new Promise((resolve, reject) => {
                 require('imagemagick').convert([
                     '-density', '300',
-                    '-quality', '100',
+                    '-quality', '100', 
                     '-background', 'white',
-                    '-alpha', 'on',
+                    '-alpha', 'flatten',
+                    '-alpha', 'remove',
                     pdfPath,
                     `${jpegBasePath}-%d.jpg`
                 ], (err) => {
@@ -792,49 +796,49 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
             });
 
             // Read all generated JPEGs (limit to first 3)
-            const jpegFiles = fs.readdirSync('./tmp')
-                .filter(f => f.startsWith('receipt-') && f.endsWith('.jpg'))
+            const jpegFiles = fs.readdirSync(tmpDir)
+                .filter(f => f.startsWith(`receipt-${requestId}-`) && f.endsWith('.jpg'))
                 .sort()
                 .slice(0, 3); // Only take first 3 pages
 
             if (jpegFiles.length === 1) {
                 // If single page, just read the file
-                imageData = fs.readFileSync(`./tmp/${jpegFiles[0]}`);
+                imageData = fs.readFileSync(`${tmpDir}/${jpegFiles[0]}`);
             } else {
                 // For multiple pages, vertically append them
+                const combinedPath = `${tmpDir}/combined-${requestId}.jpg`;
                 await new Promise((resolve, reject) => {
                     require('imagemagick').convert([
-                        ...jpegFiles.map(f => `./tmp/${f}`),
+                        ...jpegFiles.map(f => `${tmpDir}/${f}`),
                         '-append',
-                        './tmp/combined.jpg'
+                        combinedPath
                     ], (err) => {
                         if (err) reject(err);
                         else resolve();
                     });
                 });
-                imageData = fs.readFileSync('./tmp/combined.jpg');
+                imageData = fs.readFileSync(combinedPath);
+                fs.unlinkSync(combinedPath);
             }
 
             // Clean up temporary files
             fs.unlinkSync(pdfPath);
-            jpegFiles.forEach(file => fs.unlinkSync(`./tmp/${file}`));
-            if (jpegFiles.length > 1) {
-                fs.unlinkSync('./tmp/combined.jpg');
-            }
+            jpegFiles.forEach(file => fs.unlinkSync(`${tmpDir}/${file}`));
+
         } else if (imageUrl.toLowerCase().endsWith('.heic')) {
             // Create tmp directory if it doesn't exist
-            if (!existsSync('./tmp')) {
-                fs.mkdirSync('./tmp');
+            if (!existsSync(tmpDir)) {
+                fs.mkdirSync(tmpDir);
             }
 
             // Download HEIC
-            const heicPath = './tmp/receipt.heic';
+            const heicPath = `${tmpDir}/receipt-${requestId}.heic`;
             const heicResponse = await fetch(imageUrl);
             const heicBuffer = await heicResponse.arrayBuffer();
             fs.writeFileSync(heicPath, Buffer.from(heicBuffer));
 
             // Convert HEIC to JPEG using ImageMagick
-            const jpegPath = './tmp/receipt.jpg';
+            const jpegPath = `${tmpDir}/receipt-${requestId}.jpg`;
             await new Promise((resolve, reject) => {
                 require('imagemagick').convert([
                     heicPath,
@@ -855,56 +859,70 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
             imageData = new URL(imageUrl);
         }
 
-        await generateText({
-            model: aiModel,
-            messages: [
-                {
-                    role: 'user',
-                    content: [
-                        { type: 'text', text: 'Extract the receipt details from this image. You must call one of the tools and not reply in a message, or else the program will crash. Additional context: "' + JSON.stringify(metadata) + '"' },
-                        {
-                            type: 'image',
-                            image: imageData,
-                        },
-                    ],
-                },
-            ],
-            tools: {
-                extractReceipt: tool({
-                    description: 'Extract details from a receipt. Subunit = smallest currency unit (e.g., 100 cents to charge $1.00 or 100 to charge ¥100, a zero-decimal currency)',
-                    parameters: z.object({
-                        currency: z.string().describe('ISO 4217 currency code').optional(),
-                        date: z.string().describe('ISO8601 date string').optional(),
-                        vendor_name: z.string().optional(), 
-                        vendor_address: z.string().optional(), 
-                        items_purchased: z.array(z.object({
-                            qty: z.number(),
-                            memo: z.string().describe('Exact text from the receipt'),
-                            amount_subunits: z.number(),
-                        })).optional(),
-                        subtotal_amount_subunits: z.number().optional(),
-                        taxes: z.array(z.object({
-                            memo: z.string(),
-                            amount_subunits: z.number(),
-                        })).optional(),
-                        total_amount_subunits: z.number().optional(),
+        let toolCalled = false;
+        let attempts = 0;
+        const maxAttempts = 3;
+
+        while (!toolCalled && attempts < maxAttempts) {
+            attempts++;
+            await generateText({
+                model: aiModel,
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: 'Extract the receipt details from this image. Translate non-English text to English. You must call one of the tools and not reply in a message, or else the program will crash. Additional context: "' + JSON.stringify(metadata) + '"' },
+                            {
+                                type: 'image',
+                                image: imageData,
+                            },
+                        ],
+                    },
+                ],
+                tools: {
+                    extractReceipt: tool({
+                        description: 'Extract details from a receipt. Subunit = smallest currency unit (e.g., 100 cents to charge $1.00 or 100 to charge ¥100, a zero-decimal currency)',
+                        parameters: z.object({
+                            language: z.string().describe('ISO 639-1 language code for the receipt').optional(),
+                            currency: z.string().describe('ISO 4217 currency code').optional(),
+                            date: z.string().describe('ISO8601 date string').optional(),
+                            vendor_name: z.string().optional(), 
+                            vendor_address: z.string().optional(), 
+                            items_purchased: z.array(z.object({
+                                qty: z.number(),
+                                memo: z.string().describe('Exact text from the receipt'),
+                                amount_subunits: z.number(),
+                            })).optional(),
+                            subtotal_amount_subunits: z.number().optional(),
+                            taxes: z.array(z.object({
+                                memo: z.string(),
+                                amount_subunits: z.number(),
+                            })).optional(),
+                            total_amount_subunits: z.number().optional(),
+                        }),
+                        execute(receipt) {
+                            toolCalled = true;
+                            return resolve(receipt);
+                        }
                     }),
-                    execute(receipt) {
-                        return resolve(receipt)
-                    }
-                }),
-                error: tool({
-                    description: 'Return an error message if the receipt is invalid',
-                    parameters: z.object({
-                        imageDescription: z.string(),
-                        error: z.string(),
-                    }),
-                    execute(error) {
-                        return resolve(error)
-                    }
-                })
-            }
-        });
+                    error: tool({
+                        description: 'Return an error message if the receipt is invalid',
+                        parameters: z.object({
+                            imageDescription: z.string(),
+                            error: z.string(),
+                        }),
+                        execute(error) {
+                            toolCalled = true;
+                            return resolve(error);
+                        }
+                    })
+                }
+            });
+        }
+
+        if (!toolCalled) {
+            throw new Error(`Failed to extract receipt details after ${maxAttempts} attempts - no tool was called`);
+        }
     });
 }
 
@@ -935,8 +953,8 @@ async function getReceiptData(receiptId, receiptUrl, additionalContext = '') {
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
-// await processTransactions('hcb_transactions.csv');
+await processTransactions('first_transactions.csv');
 
 // Generate statement of activity
 console.log('\nGenerating Statement of Activity:');
-await generateStatementOfActivity('processed.csv');
+await generateStatementOfActivity('south_bay_processed.csv');
