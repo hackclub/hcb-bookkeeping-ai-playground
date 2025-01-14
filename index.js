@@ -294,7 +294,8 @@ async function processTransactions(csvPath) {
         // Find all fields containing both 'receipt' and 'url'
         const receiptUrlFields = Object.keys(transaction).filter(field => 
             field.toLowerCase().includes('receipt') && 
-            field.toLowerCase().includes('url')
+            field.toLowerCase().includes('url') &&
+            !field.toLowerCase().includes('preview')
         );
 
         // Extract receipt data for each receipt URL field
@@ -303,7 +304,7 @@ async function processTransactions(csvPath) {
             if (receiptUrl) {
                 try {
                     // Get receipt data (this will use cache if available)
-                    const receiptData = await getReceiptData(`${transaction.id}-${urlField}`, receiptUrl);
+                    const receiptData = await getReceiptData(`${transaction.id}-${urlField}`, receiptUrl, serializeTransaction(transaction));
 
                     // Store receipt data in a new field named after the URL field
                     transaction[`${urlField}.extracted_contents`] = receiptData;
@@ -330,7 +331,9 @@ reliability of the books so the money can be spend as effectively as possible.
 
 Given the following transaction and chart of accounts, determine the account
 name and account ID for the transaction.  Read all the fields in transaction and
-look for merchant name and receipt data that can help. Look at whether the
+look for merchant name and receipt data that can help. If a receipt is available
+and the amount reasonably matches the transaction (assuming currency conversion
+variance), prioritize the info we get from the receipt. Look at whether the
 amount is positive or negative. Positive = income, negative = expense.
 
 The nonprofit's staff are very busy, so if you can accurately categorize without
@@ -468,7 +471,11 @@ ${printChartOfAccounts()}
             transaction.amount,
             transaction.category || '',
             transaction.accountId || '',
-            ...Object.values(transaction).slice(4)
+            ...Object.values(transaction).slice(4).map(val => 
+                typeof val === 'object' && val !== null && !(val instanceof Date) 
+                    ? JSON.stringify(val) 
+                    : val
+            )
         ].map(escapeCsvField);
 
         // Save to processed.csv
@@ -515,7 +522,9 @@ async function generateStatementOfActivity(csvPath) {
         const date = new Date(record[dateField]);
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
         sortedMonths.add(monthKey);
-        const amount = parseFloat(record[amountField]) / 100;
+        const amount = record[amountField].includes('$') ? 
+            parseFloat(record[amountField].replace(/[\$,]/g, '')) :
+            parseFloat(record[amountField]) / 100;
         const accountId = record[accountIdField];
 
         // Store transaction by account
@@ -749,6 +758,7 @@ async function generateStatementOfActivity(csvPath) {
 }
 
 async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
+    console.log(imageUrl)
     return new Promise(async (resolve, reject) => {
         let imageData;
 
@@ -811,6 +821,36 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
             if (jpegFiles.length > 1) {
                 fs.unlinkSync('./tmp/combined.jpg');
             }
+        } else if (imageUrl.toLowerCase().endsWith('.heic')) {
+            // Create tmp directory if it doesn't exist
+            if (!existsSync('./tmp')) {
+                fs.mkdirSync('./tmp');
+            }
+
+            // Download HEIC
+            const heicPath = './tmp/receipt.heic';
+            const heicResponse = await fetch(imageUrl);
+            const heicBuffer = await heicResponse.arrayBuffer();
+            fs.writeFileSync(heicPath, Buffer.from(heicBuffer));
+
+            // Convert HEIC to JPEG using ImageMagick
+            const jpegPath = './tmp/receipt.jpg';
+            await new Promise((resolve, reject) => {
+                require('imagemagick').convert([
+                    heicPath,
+                    jpegPath
+                ], (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+
+            // Read converted JPEG
+            imageData = fs.readFileSync(jpegPath);
+
+            // Clean up temporary files
+            fs.unlinkSync(heicPath);
+            fs.unlinkSync(jpegPath);
         } else {
             imageData = new URL(imageUrl);
         }
@@ -821,7 +861,7 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
                 {
                     role: 'user',
                     content: [
-                        { type: 'text', text: 'Extract the receipt details from this image. You must call one of the tools. Additional context: ' + JSON.stringify(metadata) },
+                        { type: 'text', text: 'Extract the receipt details from this image. You must call one of the tools and not reply in a message, or else the program will crash. Additional context: "' + JSON.stringify(metadata) + '"' },
                         {
                             type: 'image',
                             image: imageData,
@@ -831,22 +871,23 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
             ],
             tools: {
                 extractReceipt: tool({
-                    description: 'Extract details from a receipt',
+                    description: 'Extract details from a receipt. Subunit = smallest currency unit (e.g., 100 cents to charge $1.00 or 100 to charge ¥100, a zero-decimal currency)',
                     parameters: z.object({
+                        currency: z.string().describe('ISO 4217 currency code').optional(),
                         date: z.string().describe('ISO8601 date string').optional(),
                         vendor_name: z.string().optional(), 
                         vendor_address: z.string().optional(), 
                         items_purchased: z.array(z.object({
                             qty: z.number(),
                             memo: z.string().describe('Exact text from the receipt'),
-                            amount_cents: z.number(),
+                            amount_subunits: z.number(),
                         })).optional(),
-                        subtotal_amount_cents: z.number().optional(),
+                        subtotal_amount_subunits: z.number().optional(),
                         taxes: z.array(z.object({
                             memo: z.string(),
-                            amount_cents: z.number(),
+                            amount_subunits: z.number(),
                         })).optional(),
-                        total_amount_cents: z.number().optional(),
+                        total_amount_subunits: z.number().optional(),
                     }),
                     execute(receipt) {
                         return resolve(receipt)
@@ -867,7 +908,7 @@ async function aiExtractReceiptDetails(imageUrl, metadata = {}) {
     });
 }
 
-async function getReceiptData(receiptId, receiptUrl, metadata = {}) {
+async function getReceiptData(receiptId, receiptUrl, additionalContext = '') {
     // Check if cache file exists, if not create it
     const cacheFile = 'test_data/extracted_receipts.json';
     if (!existsSync(cacheFile)) {
@@ -883,7 +924,7 @@ async function getReceiptData(receiptId, receiptUrl, metadata = {}) {
     }
 
     // Extract receipt data if not cached
-    const extractedData = await aiExtractReceiptDetails(receiptUrl, metadata);
+    const extractedData = await aiExtractReceiptDetails(receiptUrl, additionalContext);
 
     // Cache the result
     cachedData[receiptId] = extractedData;
@@ -894,7 +935,7 @@ async function getReceiptData(receiptId, receiptUrl, metadata = {}) {
 
 // Test code for loading transactions
 console.log('\nProcessing transactions from test.csv:');
-await processTransactions('hcb_transactions.csv');
+// await processTransactions('hcb_transactions.csv');
 
 // Generate statement of activity
 console.log('\nGenerating Statement of Activity:');

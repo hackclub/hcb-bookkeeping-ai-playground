@@ -5,3 +5,4 @@ processed.csv
 test_data/
 *.xlsx
 hcb_transactions.csv
+tmp/
