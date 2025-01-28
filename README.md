@@ -8,6 +8,21 @@ Give it an input CSV at `test.csv` and it will output a processed CSV at
 
 Written with the help of AI.
 
-TODO
+## Notes
 
-- Run a report on all of Counterspell, using this to implement subfunds, detailed transaction metadata, receipt extraction, etc
+Types of transactions:
+
+Income:
+
+- External -> Web donation
+- External -> Invoice payment
+- External -> Direct Deposit / Wire
+- External -> Check
+
+- Internal -> Funding from another fund
+
+Expenses:
+
+- Fiscal sponsorship fee payment from fund -> HCB
+
+- External -> All the standard items in chart of accounts
